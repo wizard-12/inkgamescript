@@ -1,5 +1,6 @@
 -- Ink Game Guard Camera Assist
 -- Marker-based targeting, configurable input, single-target snapline.
+-- v2: retry target acquisition during scoping until a target is first locked.
 -- Client-side only. Does not alter server weapon permissions.
 
 local Players = game:GetService("Players")
@@ -43,6 +44,8 @@ local lockAccumulator = 0
 local previewInterval = 0.10
 local lockCheckInterval = 0.05
 local renderName = "InkGuardCameraAssistRender"
+local lastScan = {markers = 0, eligible = 0, inFOV = 0, found = false}
+local statusAccumulator = 0
 
 local function connect(signal, fn)
     local conn = signal:Connect(fn)
@@ -335,6 +338,20 @@ end, function(button)
     button.Text = "Press a keyboard/mouse button..."
 end)
 
+-- Lightweight targeting diagnostics, visible only when the menu is open.
+local statusLabel = create("TextLabel", {
+    Size = UDim2.new(1, -4, 0, 40),
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham,
+    TextColor3 = Color3.fromRGB(180, 195, 220),
+    TextSize = 11,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center,
+    Text = "Target scan: waiting...",
+    ZIndex = 7
+}, content)
+
 local function isAimInput(input)
     return input.KeyCode == config.AimKey
         or input.UserInputType == config.AimKey
@@ -526,10 +543,13 @@ end
 local function acquireTarget(camera)
     local origin = getAimPoint(camera)
     local candidates = {}
+    local stats = {markers = 0, eligible = 0, inFOV = 0, found = false}
 
     for marker in pairs(markers) do
+        stats.markers += 1
         local character, part = resolveMarker(marker)
         if not character or not part then continue end
+        stats.eligible += 1
 
         local distance = (camera.CFrame.Position - part.Position).Magnitude
         if distance > config.MaxDistance then continue end
@@ -539,6 +559,7 @@ local function acquireTarget(camera)
 
         local screenDistance = (Vector2.new(point.X, point.Y) - origin).Magnitude
         if screenDistance > config.FOV then continue end
+        stats.inFOV += 1
 
         table.insert(candidates, {
             marker = marker,
@@ -554,9 +575,12 @@ local function acquireTarget(camera)
 
     for _, candidate in ipairs(candidates) do
         if wallVisible(camera, candidate.character, candidate.part) then
+            stats.found = true
+            lastScan = stats
             return candidate.marker, candidate.part
         end
     end
+    lastScan = stats
     return nil, nil
 end
 
@@ -587,22 +611,27 @@ RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 100, 
     local active = config.Enabled and aimHeld
 
     if active then
+        -- RMB also brings up the scope in RLGL. The camera and marker may not be
+        -- ready on the very first frame, so retry until a FIRST target is found.
+        -- Once acquired, we never switch to a second target during this hold.
+        lockAccumulator += dt
         if not didAcquireThisHold then
-            lockedMarker, lockedPart = acquireTarget(camera)
-            didAcquireThisHold = true
-            lockAccumulator = 0
-        end
-
-        if lockedMarker then
-            lockAccumulator += dt
             if lockAccumulator >= lockCheckInterval then
                 lockAccumulator = 0
-                local _, currentPart = resolveMarker(lockedMarker)
-                if not currentPart then
-                    lockedMarker, lockedPart = nil, nil
-                else
-                    lockedPart = currentPart
+                local marker, part = acquireTarget(camera)
+                if marker and part then
+                    lockedMarker, lockedPart = marker, part
+                    didAcquireThisHold = true
                 end
+            end
+        elseif lockedMarker and lockAccumulator >= lockCheckInterval then
+            lockAccumulator = 0
+            local _, currentPart = resolveMarker(lockedMarker)
+            if not currentPart then
+                lockedMarker, lockedPart = nil, nil
+                -- Keep didAcquireThisHold true: don't switch until key released.
+            else
+                lockedPart = currentPart
             end
         end
 
@@ -635,8 +664,21 @@ RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 100, 
     fovCircle.Visible = config.ShowFOV
 
     updateSnapline(camera, aimPoint, active and lockedPart or previewPart)
+
+    statusAccumulator += dt
+    if main.Visible and statusAccumulator >= 0.25 then
+        statusAccumulator = 0
+        local lockStatus = lockedPart and "LOCKED"
+            or (active and "SEARCHING" or "IDLE")
+        statusLabel.Text = string.format(
+            "Markers: %d | Eligible: %d | In FOV: %d\nAim: %s | LOS clear: %s",
+            lastScan.markers, lastScan.eligible, lastScan.inFOV,
+            lockStatus, tostring(lastScan.found)
+        )
+    end
 end)
 
 print("[INK GUARD] Loaded. Menu: RightAlt | Aim: RMB")
 print("[INK GUARD] Targeting only active GuardCanKillLockOn markers")
 print("[INK GUARD] Center origin is recommended for G3SG1 scope")
+print("[INK GUARD] v2: retries acquisition during scope until first valid target")

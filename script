@@ -1,6 +1,6 @@
 -- Ink Game Guard Camera Assist
 -- Marker-based targeting, configurable input, single-target snapline.
--- v2: retry target acquisition during scoping until a target is first locked.
+-- v3: keep v2 retry-to-lock; move camera aiming after weapon/scope updates.
 -- Client-side only. Does not alter server weapon permissions.
 
 local Players = game:GetService("Players")
@@ -603,7 +603,11 @@ local function updateSnapline(camera, point, part)
 end
 
 -- Runs after Roblox's usual camera update, for better scoped camera support.
-RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 100, function(dt)
+-- Apply the final camera orientation after the game's scope, sway, and
+-- third-person camera callbacks have had their chance to run. Previously this
+-- ran at Camera + 100, which some Ink Game weapons can override afterward.
+local FINAL_CAMERA_PRIORITY = Enum.RenderPriority.Last.Value + 50
+RunService:BindToRenderStep(renderName, FINAL_CAMERA_PRIORITY, function(dt)
     if unloaded then return end
     local camera = Workspace.CurrentCamera
     if not camera then return end
@@ -681,4 +685,4 @@ end)
 print("[INK GUARD] Loaded. Menu: RightAlt | Aim: RMB")
 print("[INK GUARD] Targeting only active GuardCanKillLockOn markers")
 print("[INK GUARD] Center origin is recommended for G3SG1 scope")
-print("[INK GUARD] v2: retries acquisition during scope until first valid target")
+print("[INK GUARD] v3: scope-safe late camera step; retry-to-lock preserved")
